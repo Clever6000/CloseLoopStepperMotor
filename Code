@@ -1,0 +1,109 @@
+#include <Wire.h>
+#include <AS5600.h>
+#include <AccelStepper.h>
+
+
+const int STEP_PIN = 26;
+const int DIR_PIN = 27;
+
+const float STEPS_PER_REV = 200 * 16;    
+const float GEAR_RATIO = 1.0;
+const float KP = 3.2;     
+const float KI = 0.08;    
+const float KD = 2.5;     
+const float DEADZONE = 1.2;
+const float MAX_SPEED = 1200;     
+const int UPDATE_INTERVAL = 5;
+
+AS5600 as5600;
+AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
+
+float targetAngle = 0.0;
+float currentAngle = 0.0;
+float error = 0.0;
+
+float integral = 0.0;
+float lastError = 0.0;
+
+unsigned long lastTime = 0;
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21, 22);
+  Wire.setClock(400000);
+
+  Serial.println("\nInicjalizacja AS5600 + PID...");
+  if (!as5600.begin()) {
+    Serial.println("BŁĄD: AS5600 nie znaleziony!");
+    while (1);
+  }
+
+  as5600.setDirection(AS5600_COUNTERCLOCK_WISE);
+
+  stepper.setMaxSpeed(8000);
+  stepper.setAcceleration(4000);
+
+  currentAngle = as5600.readAngle() * 360.0 / 4096.0;
+  targetAngle = currentAngle;
+
+  Serial.println("=== Closed Loop z PID - test ===");
+  Serial.println("Wpisz kąt 0-360");
+  Serial.printf("Start: %.1f°\n\n", currentAngle);
+}
+
+void loop() {
+  if (Serial.available()) {
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+    if (input.length() > 0) {
+      float newTarget = input.toFloat();
+      if (newTarget >= 0 && newTarget <= 360) {
+        targetAngle = newTarget;
+        integral = 0;                 
+        Serial.print("→ Nowy cel: ");
+        Serial.println(targetAngle, 1);
+      }
+    }
+  }
+
+  unsigned long now = millis();
+  if (now - lastTime >= UPDATE_INTERVAL) {
+    lastTime = now;
+
+    float raw = as5600.readAngle() * 360.0 / 4096.0;
+    static float filteredAngle = 0;
+    filteredAngle = filteredAngle * 0.82 + raw * 0.18;
+    currentAngle = filteredAngle;
+
+    error = targetAngle - currentAngle;
+    error = fmod(error + 540.0, 360.0) - 180.0;
+
+    float dt = UPDATE_INTERVAL / 1000.0;
+    integral += error * dt;
+    integral = constrain(integral, -30, 30);    
+
+    float derivative = (error - lastError) / dt;
+    lastError = error;
+
+    float output = KP * error + KI * integral + KD * derivative;
+
+    if (abs(error) > DEADZONE) {
+      float speed = constrain(output, -MAX_SPEED, MAX_SPEED);
+      
+      float stepsPerDegree = STEPS_PER_REV / 360.0 * GEAR_RATIO;
+      stepper.setSpeed(speed * stepsPerDegree);
+      stepper.runSpeed();
+    } else {
+      stepper.setSpeed(0);
+      integral = 0;
+    }
+
+    static unsigned long lastPrint = 0;
+    if (now - lastPrint > 400) {
+      Serial.printf("Cel: %.1f  Akt: %.2f  Błąd: %.2f  Speed: %.0f  I: %.2f\n", 
+                    targetAngle, currentAngle, error, stepper.speed(), integral);
+      lastPrint = now;
+    }
+  }
+
+  stepper.runSpeed();
+}
