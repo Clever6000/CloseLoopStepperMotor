@@ -1,0 +1,115 @@
+#include <Wire.h>
+#include <AS5600.h>
+#include <AccelStepper.h>
+
+AS5600 encoder;
+
+#define STEP_PIN 26
+#define DIR_PIN  27
+
+AccelStepper stepper(
+  AccelStepper::DRIVER,
+  STEP_PIN,
+  DIR_PIN
+);
+
+const float STEPS_PER_REV = 3200.0;
+float Kp = 20.0;
+float Ki = 0.0;
+float Kd = 1.5;
+float integral = 0;
+float lastError = 0;
+float filteredAngle = 0;
+float alpha = 0.3;
+
+unsigned long lastControl = 0;
+float targetAngle = 0;
+
+float readAngle()
+{
+  return encoder.rawAngle() * 360.0f / 4096.0f;
+}
+
+float angleError(float target, float current)
+{
+  float e = target - current;
+
+  if (e > 180) e -= 360;
+  if (e < -180) e += 360;
+
+  return e;
+}
+void checkSerial()
+{
+  if (Serial.available())
+  {
+    targetAngle = Serial.readStringUntil('\n').toFloat();
+    Serial.print("Target: ");
+    Serial.println(targetAngle);
+  }
+}
+
+void setup()
+{
+  Serial.begin(115200);
+
+  Wire.begin(21, 22);
+  encoder.begin();
+
+  stepper.setMaxSpeed(12000);      
+  stepper.setAcceleration(20000);
+  filteredAngle = readAngle();
+
+  Serial.println("FAST CLOSED LOOP READY");
+}
+
+void loop()
+{
+  checkSerial();
+
+
+  if (millis() - lastControl < 20)
+  {
+    stepper.runSpeed();
+    return;
+  }
+
+  lastControl = millis();
+
+  float raw = readAngle();
+  filteredAngle = filteredAngle * (1 - alpha) + raw * alpha;
+
+  float error = angleError(targetAngle, filteredAngle);
+
+
+  float dt = 0.02;
+
+  integral += error * dt;
+  float derivative = (error - lastError) / dt;
+  lastError = error;
+
+  float output =
+    Kp * error +
+    Ki * integral +
+    Kd * derivative;
+
+
+  if (abs(error) < 0.2)
+  {
+    stepper.setSpeed(0);
+    stepper.runSpeed();
+    return;
+  }
+
+  float speed = constrain(abs(output), 0, 8000);
+
+  static float lastSpeed = 0;
+  speed = lastSpeed * 0.5 + speed * 0.5;
+  lastSpeed = speed;
+
+  int dir = (output > 0) ? 1 : -1;
+
+  stepper.setSpeed(speed * dir);
+
+  stepper.runSpeed();
+}
